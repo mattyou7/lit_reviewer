@@ -1,5 +1,6 @@
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Optional
+
 
 @dataclass
 class Chunk:
@@ -7,8 +8,6 @@ class Chunk:
     section: str
     chunk_id: str
     text: str
+    subsection: Optional[str] = None
     source_start: Optional[str] = None
     source_end: Optional[str] = None
-
-    def to_dict(self):
-        return asdict(self)
