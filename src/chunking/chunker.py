@@ -1,445 +1,467 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .schema import Chunk
 
 
-# Rough approximation for English scientific text.
-# We are deliberately using an approximation here because the actual
-# tokenizer belongs to the LLM stage.
+# ============================================================
+# Chunking configuration
+# ============================================================
+
 CHARS_PER_TOKEN = 4
 
 TARGET_TOKENS = 1800
 OVERLAP_TOKENS = 150
 
 
+# ============================================================
+# Token estimation
+# ============================================================
+
 def _estimate_tokens(text: str) -> int:
-    """Approximate token count."""
+    """
+    Rough token estimate for English scientific text.
+
+    The actual tokenizer will be used later by the LLM stage.
+    """
+    if not text:
+        return 0
+
     return max(1, len(text) // CHARS_PER_TOKEN)
 
 
+# ============================================================
+# Text normalization
+# ============================================================
+
 def _normalize_text(text: Any) -> str:
-    """Convert supported text representations into clean text."""
+
     if text is None:
         return ""
 
     if isinstance(text, str):
         return text.strip()
 
-    if isinstance(text, list):
-        parts = []
-        for item in text:
-            value = _normalize_text(item)
-            if value:
-                parts.append(value)
-        return "\n\n".join(parts).strip()
-
-    if isinstance(text, dict):
-        # Prefer explicit text fields.
-        for key in ("text", "content", "body"):
-            if key in text:
-                return _normalize_text(text[key])
-
     return str(text).strip()
 
 
-def _split_paragraphs(text: str) -> List[str]:
-    """
-    Split text into paragraph-like units.
+# ============================================================
+# Build paragraphs from sectioner output
+# ============================================================
 
-    We deliberately preserve paragraphs rather than cutting every N
-    characters because scientific sentences/equations often span lines.
+def _build_paragraphs(
+    items: List[Dict[str, Any]],
+) -> List[Tuple[str, Optional[int], Optional[int]]]:
     """
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    Convert the sectioner's line-by-line representation into
+    paragraph-like units.
+
+    The sectioner gives us items like:
+
+        {
+            "page": 8,
+            "text": "...",
+            "subsection": "participants",
+            "is_heading": False
+        }
+
+    We DO NOT want every line to become a chunk.
+
+    Instead, consecutive lines belonging to the same paragraph
+    are joined together.
+
+    Blank lines terminate a paragraph.
+
+    Returns:
+
+        [
+            (paragraph_text, start_page, end_page),
+            ...
+        ]
+    """
 
     paragraphs = []
 
-    for block in text.split("\n\n"):
-        block = " ".join(line.strip() for line in block.splitlines())
-        block = " ".join(block.split())
+    current_lines: List[str] = []
+    current_start_page: Optional[int] = None
+    current_end_page: Optional[int] = None
 
-        if block:
-            paragraphs.append(block)
+    for item in items:
+
+        if not isinstance(item, dict):
+            continue
+
+        text = _normalize_text(item.get("text", ""))
+        page = item.get("page")
+
+        # ----------------------------------------------------
+        # Blank line = paragraph boundary
+        # ----------------------------------------------------
+
+        if not text:
+
+            if current_lines:
+
+                paragraph = " ".join(current_lines).strip()
+
+                if paragraph:
+                    paragraphs.append(
+                        (
+                            paragraph,
+                            current_start_page,
+                            current_end_page,
+                        )
+                    )
+
+                current_lines = []
+                current_start_page = None
+                current_end_page = None
+
+            continue
+
+        # ----------------------------------------------------
+        # Heading items are NOT paragraph text.
+        #
+        # The subsection name is already stored in metadata.
+        # ----------------------------------------------------
+
+        if item.get("is_heading", False):
+            continue
+
+        # ----------------------------------------------------
+        # Start new paragraph
+        # ----------------------------------------------------
+
+        if current_start_page is None:
+            current_start_page = page
+
+        current_end_page = page
+
+        current_lines.append(text)
+
+    # --------------------------------------------------------
+    # Flush final paragraph
+    # --------------------------------------------------------
+
+    if current_lines:
+
+        paragraph = " ".join(current_lines).strip()
+
+        if paragraph:
+            paragraphs.append(
+                (
+                    paragraph,
+                    current_start_page,
+                    current_end_page,
+                )
+            )
 
     return paragraphs
 
 
-def _tail_for_overlap(paragraphs: List[str], max_tokens: int) -> List[str]:
-    """
-    Return the final paragraphs that fit approximately within the
-    requested overlap size.
-    """
-    selected = []
-    tokens = 0
-
-    for paragraph in reversed(paragraphs):
-        n = _estimate_tokens(paragraph)
-
-        if selected and tokens + n > max_tokens:
-            break
-
-        selected.append(paragraph)
-        tokens += n
-
-        if tokens >= max_tokens:
-            break
-
-    return list(reversed(selected))
-
+# ============================================================
+# Chunk one subsection
+# ============================================================
 
 def _chunk_subsection(
-    text: str,
+    items: List[Dict[str, Any]],
     target_tokens: int = TARGET_TOKENS,
     overlap_tokens: int = OVERLAP_TOKENS,
-) -> List[str]:
+) -> List[Tuple[str, Optional[int], Optional[int]]]:
     """
-    Chunk one subsection while preserving paragraph boundaries.
+    Chunk a single subsection.
+
+    Paragraphs are kept intact wherever possible.
+
+    Returns:
+
+        [
+            (
+                chunk_text,
+                source_start_page,
+                source_end_page
+            ),
+            ...
+        ]
     """
-    paragraphs = _split_paragraphs(text)
+
+    paragraphs = _build_paragraphs(items)
 
     if not paragraphs:
         return []
 
-    chunks: List[str] = []
-    current: List[str] = []
+    chunks = []
+
+    current_paragraphs: List[
+        Tuple[str, Optional[int], Optional[int]]
+    ] = []
+
     current_tokens = 0
 
     i = 0
 
     while i < len(paragraphs):
-        paragraph = paragraphs[i]
+
+        paragraph, start_page, end_page = paragraphs[i]
+
         paragraph_tokens = _estimate_tokens(paragraph)
 
-        # If this is the first paragraph and it is already larger than
-        # the target, keep it intact rather than destroying it.
-        if not current and paragraph_tokens > target_tokens:
-            chunks.append(paragraph)
+        # ----------------------------------------------------
+        # Very large paragraph
+        # ----------------------------------------------------
 
-            overlap = _tail_for_overlap(
-                [paragraph],
-                overlap_tokens,
+        if (
+            not current_paragraphs
+            and paragraph_tokens > target_tokens
+        ):
+
+            chunks.append(
+                (
+                    paragraph,
+                    start_page,
+                    end_page,
+                )
             )
 
-            current = overlap
-            current_tokens = sum(_estimate_tokens(p) for p in current)
-
+            # Do not create artificial overlap from a giant
+            # paragraph. Move directly to the next paragraph.
             i += 1
             continue
 
-        # Normal accumulation.
+        # ----------------------------------------------------
+        # Would exceed target
+        # ----------------------------------------------------
+
         if (
-            current
+            current_paragraphs
             and current_tokens + paragraph_tokens > target_tokens
         ):
-            chunks.append("\n\n".join(current))
 
-            overlap = _tail_for_overlap(
-                current,
-                overlap_tokens,
+            chunk_text = "\n\n".join(
+                p[0]
+                for p in current_paragraphs
             )
 
-            current = overlap
+            chunk_start = current_paragraphs[0][1]
+            chunk_end = current_paragraphs[-1][2]
+
+            chunks.append(
+                (
+                    chunk_text,
+                    chunk_start,
+                    chunk_end,
+                )
+            )
+
+            # ------------------------------------------------
+            # Add paragraph-level overlap.
+            # ------------------------------------------------
+
+            overlap_paragraphs = []
+            overlap_count = 0
+
+            for p in reversed(current_paragraphs):
+
+                p_tokens = _estimate_tokens(p[0])
+
+                if (
+                    overlap_paragraphs
+                    and overlap_count + p_tokens > overlap_tokens
+                ):
+                    break
+
+                overlap_paragraphs.append(p)
+                overlap_count += p_tokens
+
+                if overlap_count >= overlap_tokens:
+                    break
+
+            overlap_paragraphs.reverse()
+
+            current_paragraphs = overlap_paragraphs
+
             current_tokens = sum(
-                _estimate_tokens(p) for p in current
+                _estimate_tokens(p[0])
+                for p in current_paragraphs
             )
+
+            # IMPORTANT:
+            # Do not increment i here.
+            # The paragraph that didn't fit needs to be
+            # reconsidered for the next chunk.
 
             continue
 
-        current.append(paragraph)
+        # ----------------------------------------------------
+        # Add paragraph
+        # ----------------------------------------------------
+
+        current_paragraphs.append(
+            (
+                paragraph,
+                start_page,
+                end_page,
+            )
+        )
+
         current_tokens += paragraph_tokens
+
         i += 1
 
-    if current:
-        final_text = "\n\n".join(current)
+    # --------------------------------------------------------
+    # Final chunk
+    # --------------------------------------------------------
 
-        # Avoid creating a duplicate chunk consisting entirely of
-        # overlap from the previous chunk.
-        if not chunks or final_text != chunks[-1]:
-            chunks.append(final_text)
+    if current_paragraphs:
+
+        chunk_text = "\n\n".join(
+            p[0]
+            for p in current_paragraphs
+        )
+
+        chunk_start = current_paragraphs[0][1]
+        chunk_end = current_paragraphs[-1][2]
+
+        # Avoid duplicate final chunk
+        if (
+            not chunks
+            or chunk_text != chunks[-1][0]
+        ):
+            chunks.append(
+                (
+                    chunk_text,
+                    chunk_start,
+                    chunk_end,
+                )
+            )
 
     return chunks
 
 
-def _extract_subsections(
-    section_name: str,
-    section_data: Any,
-) -> List[Tuple[str, Optional[str], str, Optional[str], Optional[str]]]:
+# ============================================================
+# Group section items by subsection
+# ============================================================
+
+def _group_by_subsection(
+    section_items: List[Dict[str, Any]],
+) -> List[
+    Tuple[
+        Optional[str],
+        List[Dict[str, Any]]
+    ]
+]:
     """
-    Convert the various section representations into:
+    Convert the sectioner's flat list into logical subsections.
 
-        section,
-        subsection,
-        text,
-        source_start,
-        source_end
+    Example input:
 
-    The function is intentionally tolerant because the sectioner has
-    evolved through several representations.
+        Participants heading
+        paragraph
+        paragraph
+        blank
+        paragraph
+        Task heading
+        paragraph
+        paragraph
+
+    becomes:
+
+        [
+            ("participants", [...]),
+            ("task", [...])
+        ]
+
+    Text before the first subsection heading remains under
+    subsection=None.
     """
 
-    results = []
+    groups = []
 
-    # ------------------------------------------------------------
-    # Case 1:
-    # section_data is simply a string
-    # ------------------------------------------------------------
-    if isinstance(section_data, str):
-        text = _normalize_text(section_data)
+    current_subsection: Optional[str] = None
+    current_items: List[Dict[str, Any]] = []
 
-        if text:
-            results.append(
-                (
-                    section_name,
-                    None,
-                    text,
-                    None,
-                    None,
+    for item in section_items:
+
+        if not isinstance(item, dict):
+            continue
+
+        subsection = item.get("subsection")
+
+        # ----------------------------------------------------
+        # A subsection heading starts a new group.
+        # ----------------------------------------------------
+
+        if item.get("is_heading", False):
+
+            if current_items:
+                groups.append(
+                    (
+                        current_subsection,
+                        current_items,
+                    )
                 )
+
+            current_subsection = (
+                str(subsection)
+                if subsection
+                else None
             )
 
-        return results
+            current_items = []
 
-    # ------------------------------------------------------------
-    # Case 2:
-    # section_data is a list
-    # ------------------------------------------------------------
-    if isinstance(section_data, list):
+            continue
 
-        # A list may contain subsection dictionaries.
-        for item in section_data:
+        # ----------------------------------------------------
+        # Normal text
+        # ----------------------------------------------------
 
-            if isinstance(item, dict):
+        current_items.append(item)
 
-                subsection = (
-                    item.get("subsection")
-                    or item.get("name")
-                    or item.get("heading")
-                    or item.get("title")
-                )
+    # --------------------------------------------------------
+    # Final group
+    # --------------------------------------------------------
 
-                text = (
-                    item.get("text")
-                    or item.get("content")
-                    or item.get("body")
-                    or ""
-                )
-
-                source_start = (
-                    item.get("source_start")
-                    or item.get("start")
-                )
-
-                source_end = (
-                    item.get("source_end")
-                    or item.get("end")
-                )
-
-                text = _normalize_text(text)
-
-                if text:
-                    results.append(
-                        (
-                            section_name,
-                            subsection,
-                            text,
-                            source_start,
-                            source_end,
-                        )
-                    )
-
-            else:
-                text = _normalize_text(item)
-
-                if text:
-                    results.append(
-                        (
-                            section_name,
-                            None,
-                            text,
-                            None,
-                            None,
-                        )
-                    )
-
-        return results
-
-    # ------------------------------------------------------------
-    # Case 3:
-    # section_data is a dictionary
-    # ------------------------------------------------------------
-    if isinstance(section_data, dict):
-
-        # Explicit subsection container.
-        subsection_data = (
-            section_data.get("subsections")
-            or section_data.get("children")
+    if current_items:
+        groups.append(
+            (
+                current_subsection,
+                current_items,
+            )
         )
 
-        if subsection_data is not None:
+    return groups
 
-            if isinstance(subsection_data, dict):
 
-                for subsection_name, subsection_value in subsection_data.items():
+# ============================================================
+# Safe ID creation
+# ============================================================
 
-                    text = _normalize_text(subsection_value)
+def _safe_id(text: str) -> str:
 
-                    if text:
-                        results.append(
-                            (
-                                section_name,
-                                str(subsection_name),
-                                text,
-                                None,
-                                None,
-                            )
-                        )
+    text = str(text).lower().strip()
 
-                return results
+    # Replace anything other than letters/numbers with "_"
+    result = ""
 
-            if isinstance(subsection_data, list):
+    for char in text:
 
-                for item in subsection_data:
+        if char.isalnum():
+            result += char
 
-                    if isinstance(item, dict):
+        else:
+            result += "_"
 
-                        subsection = (
-                            item.get("subsection")
-                            or item.get("name")
-                            or item.get("heading")
-                            or item.get("title")
-                        )
+    # Collapse repeated underscores
+    while "__" in result:
+        result = result.replace("__", "_")
 
-                        text = (
-                            item.get("text")
-                            or item.get("content")
-                            or item.get("body")
-                            or ""
-                        )
+    return result.strip("_") or "section"
 
-                        source_start = (
-                            item.get("source_start")
-                            or item.get("start")
-                        )
 
-                        source_end = (
-                            item.get("source_end")
-                            or item.get("end")
-                        )
-
-                        text = _normalize_text(text)
-
-                        if text:
-                            results.append(
-                                (
-                                    section_name,
-                                    subsection,
-                                    text,
-                                    source_start,
-                                    source_end,
-                                )
-                            )
-
-                    else:
-                        text = _normalize_text(item)
-
-                        if text:
-                            results.append(
-                                (
-                                    section_name,
-                                    None,
-                                    text,
-                                    None,
-                                    None,
-                                )
-                            )
-
-                return results
-
-        # --------------------------------------------------------
-        # Dictionary itself may represent:
-        #
-        # {
-        #   "text": "...",
-        #   "subsection": "...",
-        #   ...
-        # }
-        # --------------------------------------------------------
-
-        text = (
-            section_data.get("text")
-            or section_data.get("content")
-            or section_data.get("body")
-        )
-
-        if text is not None:
-
-            subsection = (
-                section_data.get("subsection")
-                or section_data.get("name")
-                or section_data.get("heading")
-                or section_data.get("title")
-            )
-
-            source_start = (
-                section_data.get("source_start")
-                or section_data.get("start")
-            )
-
-            source_end = (
-                section_data.get("source_end")
-                or section_data.get("end")
-            )
-
-            text = _normalize_text(text)
-
-            if text:
-                results.append(
-                    (
-                        section_name,
-                        subsection,
-                        text,
-                        source_start,
-                        source_end,
-                    )
-                )
-
-            return results
-
-        # --------------------------------------------------------
-        # Last fallback:
-        # dictionary keys are treated as subsection names.
-        # --------------------------------------------------------
-        for subsection_name, subsection_value in section_data.items():
-
-            if subsection_name in {
-                "page",
-                "pages",
-                "source_start",
-                "source_end",
-                "start",
-                "end",
-            }:
-                continue
-
-            text = _normalize_text(subsection_value)
-
-            if text:
-                results.append(
-                    (
-                        section_name,
-                        str(subsection_name),
-                        text,
-                        None,
-                        None,
-                    )
-                )
-
-        return results
-
-    return results
-
+# ============================================================
+# Main chunking function
+# ============================================================
 
 def chunk_all_sections(
     sections: Dict[str, Any],
@@ -448,62 +470,69 @@ def chunk_all_sections(
     overlap_tokens: int = OVERLAP_TOKENS,
 ) -> List[Chunk]:
     """
-    Chunk every section while preserving subsection identity.
+    Chunk all sections produced by split_into_sections().
 
-    Output:
-        List[Chunk]
+    The sectioner output is expected to look like:
 
-    Each Chunk contains:
-        paper_id
-        section
-        subsection
-        chunk_id
-        text
-        source_start
-        source_end
+        {
+            "methods": [
+                {
+                    "page": 8,
+                    "text": "...",
+                    "subsection": "participants",
+                    "is_heading": False
+                },
+                ...
+            ]
+        }
+
+    The chunker:
+
+        1. Preserves major section
+        2. Preserves subsection
+        3. Groups lines into paragraphs
+        4. Chunks paragraphs at ~1800 tokens
+        5. Adds ~150-token overlap
+        6. Preserves page ranges
     """
 
     chunks: List[Chunk] = []
 
     for section_name, section_data in sections.items():
 
-        subsection_items = _extract_subsections(
-            section_name,
-            section_data,
+        # The current sectioner produces lists of dictionaries.
+        if not isinstance(section_data, list):
+            continue
+
+        subsection_groups = _group_by_subsection(
+            section_data
         )
 
-        for (
-            section,
-            subsection,
-            text,
-            source_start,
-            source_end,
-        ) in subsection_items:
+        for subsection, items in subsection_groups:
 
-            subsection_chunks = _chunk_subsection(
-                text,
+            chunk_results = _chunk_subsection(
+                items,
                 target_tokens=target_tokens,
                 overlap_tokens=overlap_tokens,
             )
 
-            for local_index, chunk_text in enumerate(
-                subsection_chunks,
+            for local_index, (
+                chunk_text,
+                source_start,
+                source_end,
+            ) in enumerate(
+                chunk_results,
                 start=1,
             ):
 
-                # Make IDs stable and human-readable.
-                section_id = (
-                    section.lower()
-                    .replace(" ", "_")
-                    .replace("/", "_")
+                section_id = _safe_id(
+                    section_name
                 )
 
                 if subsection:
-                    subsection_id = (
-                        str(subsection)
-                        .lower()
-                        .replace(" ", "_")
-                        .replace("/", "_")
+
+                    subsection_id = _safe_id(
+                        subsection
                     )
 
                     chunk_id = (
@@ -511,28 +540,62 @@ def chunk_all_sections(
                         f"{subsection_id}_"
                         f"{local_index:03d}"
                     )
+
                 else:
+
                     chunk_id = (
                         f"{section_id}_"
                         f"{local_index:03d}"
                     )
 
+                # ------------------------------------------------
+                # Store page provenance as strings.
+                # ------------------------------------------------
+
+                if source_start is not None:
+
+                    if (
+                        source_end is not None
+                        and source_end != source_start
+                    ):
+                        source_start_value = str(
+                            source_start
+                        )
+                        source_end_value = str(
+                            source_end
+                        )
+
+                    else:
+                        source_start_value = str(
+                            source_start
+                        )
+                        source_end_value = str(
+                            source_end
+                        )
+
+                else:
+                    source_start_value = None
+                    source_end_value = None
+
                 chunks.append(
                     Chunk(
                         paper_id=paper_id,
-                        section=section,
+                        section=section_name,
+                        subsection=subsection,
                         chunk_id=chunk_id,
                         text=chunk_text,
-                        subsection=subsection,
-                        source_start=source_start,
-                        source_end=source_end,
+                        source_start=source_start_value,
+                        source_end=source_end_value,
                     )
                 )
 
     return chunks
 
 
-# Compatibility alias used by the existing pipeline.
+# ============================================================
+# Compatibility alias
+# ============================================================
+
 def chunk_sections(
     sections: Dict[str, Any],
     paper_id: str = "paper_001",

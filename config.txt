@@ -1,0 +1,23 @@
+PDF
+ ↓
+PDF extraction                         ✅
+ ↓
+Section detection                      ✅
+ ↓
+Paragraph-aware chunking               ✅
+ ↓
+Teacher LLM (Qwen3-1.7B)               ← NEXT
+ ↓
+Structured extraction per chunk
+ ↓
+Merge chunk outputs
+ ↓
+Final paper-level structured summary
+ ↓
+Embeddings
+ ↓
+Landscape / similarity / discovery
+ ↓
+Student model (0.6B) distillation
+ ↓
+Evaluation

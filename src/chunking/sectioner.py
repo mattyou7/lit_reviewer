@@ -1,6 +1,5 @@
 import re
 
-
 # ============================================================
 # Major scientific-paper sections
 # ============================================================
@@ -117,25 +116,37 @@ SUBSECTION_ALIASES = {
 
 
 # ============================================================
+# Block types that can never be section/subsection headings.
+#
+# Equations, figure/table captions, and references have already
+# been positively identified as something else at extraction
+# time (src/pdf/extract.py::classify_block_type). Re-running
+# heading heuristics on them was the single biggest source of
+# spurious subsections (e.g. an equation fragment or a figure
+# axis label being promoted to a "heading"), so they're excluded
+# from heading detection entirely.
+# ============================================================
+
+_NON_HEADING_TYPES = {"equation", "figure_caption", "table", "reference"}
+
+
+# ============================================================
 # Heading normalization
 # ============================================================
 
 def normalize_heading(text: str) -> str:
-
     text = text.strip()
 
     # Collapse whitespace
     text = re.sub(r"\s+", " ", text)
 
     # Remove common numbering:
-    #
     # 1.
     # 1)
     # 1.2
     # 1.2.3
     # I.
     # III.
-    #
     text = re.sub(
         r"^(?:"
         r"\d+(?:\.\d+)*[\.\)]?\s+"
@@ -148,13 +159,101 @@ def normalize_heading(text: str) -> str:
     )
 
     # Remove trailing punctuation
-    text = re.sub(
-        r"[\.:;]+$",
-        "",
-        text,
-    )
+    text = re.sub(r"[\.:;]+$", "", text)
 
     return text.lower().strip()
+
+
+# ============================================================
+# Heading-shape checks
+# ============================================================
+
+def looks_like_heading(line: str) -> bool:
+    """
+    Conservative check for whether a line looks like a real
+    scientific subsection heading.
+
+    This is deliberately strict because PDF extraction often
+    produces equation fragments, figure/axis labels, and other
+    short data annotations that look like short text lines.
+    """
+
+    if not line:
+        return False
+
+    text = line.strip()
+
+    # Too long to plausibly be a heading
+    if len(text) > 100:
+        return False
+
+    # Too short
+    if len(text) < 3:
+        return False
+
+    # Headings should not end like normal prose/questions
+    if text.endswith((".", "?", "!")):
+        return False
+
+    # Reject obvious mathematical/equation fragments
+    math_chars = set("=~<>±×÷∑√∞^_{}[]")
+    if any(char in text for char in math_chars):
+        return False
+
+    # Reject parenthetical asides. Real subsection headings in
+    # scientific papers essentially never contain parentheses;
+    # in practice, short parenthetical fragments here are almost
+    # always figure/axis labels or data annotations that leaked
+    # out of a plot (e.g. "Inconsistent (I)", "(consistent)",
+    # "(SOA: 0.15 s)") rather than real headings.
+    if "(" in text or ")" in text:
+        return False
+
+    # Reject lines where any whitespace-separated token is a
+    # bare number (e.g. "Sample 1"). Real headings don't end in
+    # an unlabeled digit; numbered *section* headings are handled
+    # separately via the explicit numbering regex below.
+    if any(token.isdigit() for token in text.split()):
+        return False
+
+    # Reject lines containing obvious equation-style patterns
+    if re.search(
+        r"\b(?:soa|hz|ms|sec|seconds?|s)\s*[:=~]",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+
+    # Reject lines that are overwhelmingly symbols/numbers
+    alphanumeric = sum(c.isalnum() for c in text)
+    if alphanumeric < 3:
+        return False
+
+    # Reject lines with too many digits.
+    digit_count = sum(c.isdigit() for c in text)
+    if digit_count > max(2, len(text) // 4):
+        return False
+
+    # Reject common equation / measurement fragments
+    if re.search(
+        r"^\s*[\d\W_]*"
+        r"(?:s|ms|hz|khz|mv|cm|mm|°|%)"
+        r"[\d\W_]*$",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+
+    # A real heading normally contains words.
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]+", text)
+
+    if not words:
+        return False
+
+    if len(words) > 12:
+        return False
+
+    return True
 
 
 # ============================================================
@@ -182,6 +281,9 @@ def detect_major_section_heading(line: str):
 
 def detect_subsection_heading(line: str):
 
+    if not looks_like_heading(line):
+        return None
+
     normalized = normalize_heading(line)
 
     if not normalized:
@@ -196,16 +298,15 @@ def detect_subsection_heading(line: str):
 
     # --------------------------------------------------------
     # Numbered subsection
-    # --------------------------------------------------------
     #
     # Examples:
-    #
     # 2.1 Participants
     # 2.2 Stimuli
     # 3.1 Data analysis
     #
-    # We only accept numbered headings when the text after
-    # the number looks like a plausible heading.
+    # IMPORTANT:
+    # We only accept numbered headings when the extracted
+    # ORIGINAL line has an actual subsection number.
     # --------------------------------------------------------
 
     match = re.match(
@@ -215,21 +316,21 @@ def detect_subsection_heading(line: str):
 
     if match:
 
-        title = normalize_heading(
-            match.group(1)
-        )
+        title = match.group(1).strip()
 
-        words = title.split()
+        if not looks_like_heading(title):
+            return None
+
+        title_normalized = normalize_heading(title)
+
+        words = title_normalized.split()
 
         if (
-            title
-            and len(title) <= 100
+            title_normalized
+            and len(title_normalized) <= 100
             and 1 <= len(words) <= 12
-            and not title.endswith(
-                (".", "?", "!")
-            )
         ):
-            return title
+            return title_normalized
 
     return None
 
@@ -239,6 +340,22 @@ def detect_subsection_heading(line: str):
 # ============================================================
 
 def split_into_sections(pages):
+    """
+    Split extracted pages into major sections / subsections.
+
+    Preferred path: pages carry typed `blocks` (from
+    src/pdf/extract.py). Each block is a paragraph-level unit
+    that PyMuPDF already grouped correctly, so we classify it
+    once and keep it intact — we do NOT re-split it into
+    individual lines. Only blocks of type "paragraph" are ever
+    considered as heading candidates; equations, figure/table
+    captions, and references are structurally excluded (see
+    `_NON_HEADING_TYPES`).
+
+    Legacy fallback: if a page has no `blocks` (e.g. pages built
+    from raw text elsewhere), we fall back to the old line-based
+    splitting so older callers/tests don't break.
+    """
 
     sections = {}
 
@@ -247,52 +364,113 @@ def split_into_sections(pages):
 
     sections[current_section] = []
 
+    fallback_block_counter = 0
+
     for page in pages:
 
         page_number = page["page"]
+        blocks = page.get("blocks")
+
+        # ------------------------------------------------------
+        # Preferred path: typed, block-level input.
+        # ------------------------------------------------------
+
+        if blocks:
+
+            for block in blocks:
+
+                if not isinstance(block, dict):
+                    continue
+
+                text = str(block.get("text", "")).strip()
+
+                if not text:
+                    continue
+
+                block_type = block.get("type", "paragraph")
+                block_id = block.get("block_id")
+
+                if block_id is None:
+                    fallback_block_counter += 1
+                    block_id = f"p{page_number}_b{fallback_block_counter}"
+
+                # ------------------------------------------
+                # Only paragraph-shaped blocks can ever be a
+                # section/subsection heading. Equations,
+                # figure/table captions and references are
+                # never candidates.
+                # ------------------------------------------
+
+                if block_type not in _NON_HEADING_TYPES:
+
+                    major_section = detect_major_section_heading(text)
+
+                    if major_section is not None:
+
+                        current_section = major_section
+                        current_subsection = None
+
+                        sections.setdefault(current_section, [])
+
+                        continue
+
+                    subsection = detect_subsection_heading(text)
+
+                    if subsection is not None:
+
+                        current_subsection = subsection
+
+                        sections.setdefault(
+                            current_section, []
+                        ).append({
+                            "page": page_number,
+                            "text": text,
+                            "subsection": current_subsection,
+                            "is_heading": True,
+                            "type": "heading",
+                            "block_id": block_id,
+                        })
+
+                        continue
+
+                # ------------------------------------------
+                # Ordinary content block (paragraph, equation,
+                # figure_caption, table, reference, unknown).
+                # ------------------------------------------
+
+                sections.setdefault(
+                    current_section, []
+                ).append({
+                    "page": page_number,
+                    "text": text,
+                    "subsection": current_subsection,
+                    "is_heading": False,
+                    "type": block_type,
+                    "block_id": block_id,
+                })
+
+            continue
+
+        # ------------------------------------------------------
+        # Legacy fallback: no `blocks`, only flat `text`.
+        # ------------------------------------------------------
+
         text = page.get("text", "")
 
         if not text:
             continue
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # The function accepts both:
-        #
-        #   {"page": 1, "text": "..."}
-        #
-        # and the old internal list format.
-        # ----------------------------------------------------
-
         if isinstance(text, list):
-
             lines = text
-
         else:
-
             lines = text.splitlines()
 
         for raw_line in lines:
 
-            # ------------------------------------------------
-            # Support old list entries
-            # ------------------------------------------------
-
             if isinstance(raw_line, dict):
-
-                line = raw_line.get(
-                    "text",
-                    "",
-                ).strip()
-
+                line = str(raw_line.get("text", "")).strip()
             else:
-
                 line = str(raw_line).strip()
-
-            # ------------------------------------------------
-            # Blank line
-            # ------------------------------------------------
 
             if not line:
 
@@ -303,66 +481,55 @@ def split_into_sections(pages):
                         "text": "",
                         "subsection": current_subsection,
                         "is_heading": False,
+                        "type": "unknown",
+                        "block_id": None,
                     })
 
                 continue
 
-            # ------------------------------------------------
-            # Major section
-            # ------------------------------------------------
-
-            major_section = detect_major_section_heading(
-                line
-            )
+            major_section = detect_major_section_heading(line)
 
             if major_section is not None:
 
                 current_section = major_section
                 current_subsection = None
 
-                sections.setdefault(
-                    current_section,
-                    [],
-                )
+                sections.setdefault(current_section, [])
 
                 continue
 
-            # ------------------------------------------------
-            # Subsection
-            # ------------------------------------------------
-
-            subsection = detect_subsection_heading(
-                line
-            )
+            subsection = detect_subsection_heading(line)
 
             if subsection is not None:
 
                 current_subsection = subsection
 
+                fallback_block_counter += 1
+
                 sections.setdefault(
-                    current_section,
-                    [],
+                    current_section, []
                 ).append({
                     "page": page_number,
                     "text": line,
                     "subsection": current_subsection,
                     "is_heading": True,
+                    "type": "heading",
+                    "block_id": f"p{page_number}_b{fallback_block_counter}",
                 })
 
                 continue
 
-            # ------------------------------------------------
-            # Normal text
-            # ------------------------------------------------
+            fallback_block_counter += 1
 
             sections.setdefault(
-                current_section,
-                [],
+                current_section, []
             ).append({
                 "page": page_number,
                 "text": line,
                 "subsection": current_subsection,
                 "is_heading": False,
+                "type": "paragraph",
+                "block_id": f"p{page_number}_b{fallback_block_counter}",
             })
 
     return sections
