@@ -1,0 +1,1 @@
+Embedding model is independent of the LLM. It should handle semantic similarity and retrieval. The embedding model should be benchmarked separately for memory/latency and can later be swapped without changing the LLM interface.

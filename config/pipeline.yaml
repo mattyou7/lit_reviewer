@@ -1,0 +1,35 @@
+project_name: lit-review-assistant
+resource_policy:
+  max_cpu_threads: 1
+  llm_on_demand: true
+  max_total_context_tokens: 8000
+  store_hidden_states: false
+
+teacher:
+  model: Qwen/Qwen3-1.7B-MLX-8bit
+  max_tokens: 2500
+  temperature: 0.0
+
+student:
+  base_model: Qwen/Qwen3-0.6B
+  quantization: null
+
+chunking:
+  target_tokens: 1800
+  overlap_tokens: 150
+  sections:
+    - abstract
+    - introduction
+    - methods
+    - results
+    - discussion
+
+evaluation:
+  metrics:
+    - extraction_f1
+    - json_validity
+    - unsupported_claim_rate
+    - source_location_accuracy
+    - latency_seconds
+    - peak_memory_gb
+    - cpu_utilization
