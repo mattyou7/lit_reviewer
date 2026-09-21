@@ -1,0 +1,10 @@
+{
+  "description": "Enables researchers to organize literature, explore interactive knowledge maps, extract methods, and learn contextually within a unified, scientist-driven environment.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
