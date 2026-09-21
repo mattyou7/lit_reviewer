@@ -1,6 +1,6 @@
 # Lit Review Assistant — Local Landscape Engine
 
-Scientist-controlled literature landscape pipeline.
+Making literature review easier and understanding concepts and topics in a domain quicker!
 
 ## Design
 
