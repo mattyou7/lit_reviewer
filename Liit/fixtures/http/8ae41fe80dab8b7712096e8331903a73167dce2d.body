@@ -1,0 +1,33 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/E0SYjT9J2Y0IBIeNYoBj9DIJDtg</id>
+  <title>arXiv Query: search_query=all:"History-dependent" AND all:"Biases" AND all:"Perceptual"&amp;id_list=&amp;start=0&amp;max_results=10</title>
+  <updated>2026-09-23T14:30:28Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=all:%22History-dependent%22+AND+(all:%22Biases%22+AND+all:%22Perceptual%22)&amp;start=0&amp;max_results=10&amp;id_list=" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>10</opensearch:itemsPerPage>
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2603.11248v1</id>
+    <title>The macaque IT cortex but not current artificial vision networks encode object position in perceptually aligned coordinates</title>
+    <updated>2026-03-11T19:13:54Z</updated>
+    <link href="https://arxiv.org/abs/2603.11248v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2603.11248v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Efficient interaction with the visual world requires not only accurate object identification but also precise localization of objects in space. While spatial ("where") processing has traditionally been attributed to dorsal stream pathways, recent work has shown that object position can also be decoded from responses in ventral stream areas such as the inferior temporal (IT) cortex. However, because object position in these paradigms is tightly coupled to pixel-based location, it remains unclear whether ventral stream position signals reflect perceptually meaningful spatial representations or simply inherited retinotopic structure. To address this question, we used the motion aftereffect, a classic visual illusion that shifts perceived object position without changing retinal input. Combining large-scale intracortical recordings in macaque IT with matched human psychophysics, we found that motion adaptation induces systematic direction-opponent biases in IT population codes for object position that mirror human perceptual reports, despite identical pixel-level stimuli. These effects are accompanied by adaptation-driven changes in the geometry of IT population representations. We further tested whether artificial vision systems exhibit similar dynamics. Standard feedforward, recurrent, and state-of-the-art video-based neural networks accurately encode object position but fail to produce adaptation-induced position shifts. However, applying empirically derived transformations based on IT adaptation dynamics to model feature spaces is sufficient to generate similar biases. Together, these results indicate that IT represents object position in perceptually aligned coordinates and also highlight a gap between biological and artificial vision systems in capturing history-dependent spatial coding.</summary>
+    <category term="q-bio.NC" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2026-03-11T19:13:54Z</published>
+    <arxiv:primary_category term="q-bio.NC"/>
+    <author>
+      <name>Elizaveta Yakubovskaya</name>
+    </author>
+    <author>
+      <name>Hamidreza Ramezanpour</name>
+    </author>
+    <author>
+      <name>Matteo Dunnhofer</name>
+    </author>
+    <author>
+      <name>Kohitij Kar</name>
+    </author>
+  </entry>
+</feed>

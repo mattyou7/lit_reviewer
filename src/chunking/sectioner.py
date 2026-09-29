@@ -352,6 +352,15 @@ def split_into_sections(pages):
     captions, and references are structurally excluded (see
     `_NON_HEADING_TYPES`).
 
+    Heading test: PyMuPDF frequently merges a heading with the
+    following paragraph into ONE block (e.g. "Results\\nDuring
+    MEG..."). Testing only the whole block would therefore miss
+    every major section. We test the block's FIRST line as the
+    heading candidate; any remaining lines become ordinary
+    content of the (possibly new) section. This is deliberately
+    conservative: only the first line is ever a candidate, and
+    major sections still require an exact alias match.
+
     Legacy fallback: if a page has no `blocks` (e.g. pages built
     from raw text elsewhere), we fall back to the old line-based
     splitting so older callers/tests don't break.
@@ -398,12 +407,28 @@ def split_into_sections(pages):
                 # Only paragraph-shaped blocks can ever be a
                 # section/subsection heading. Equations,
                 # figure/table captions and references are
-                # never candidates.
+                # never candidates. The candidate is the
+                # block's FIRST line: headings are routinely
+                # merged with body text into one block.
                 # ------------------------------------------
 
-                if block_type not in _NON_HEADING_TYPES:
+                first_line = text.splitlines()[0].strip() \
+                    if text.splitlines() else ""
+                rest_lines = text.splitlines()[1:]
 
-                    major_section = detect_major_section_heading(text)
+                rest = "\n".join(
+                    line for line in rest_lines
+                    if line.strip()
+                ).strip()
+
+                if (
+                    block_type not in _NON_HEADING_TYPES
+                    and first_line
+                ):
+
+                    major_section = detect_major_section_heading(
+                        first_line
+                    )
 
                     if major_section is not None:
 
@@ -412,9 +437,23 @@ def split_into_sections(pages):
 
                         sections.setdefault(current_section, [])
 
+                        if rest:
+
+                            sections[current_section].append({
+                                "page": page_number,
+                                "text": rest,
+                                "subsection": None,
+                                "is_heading": False,
+                                "type": block_type,
+                                "block_id": f"{block_id}#r",
+                                "unit": "block",
+                            })
+
                         continue
 
-                    subsection = detect_subsection_heading(text)
+                    subsection = detect_subsection_heading(
+                        first_line
+                    )
 
                     if subsection is not None:
 
@@ -424,12 +463,25 @@ def split_into_sections(pages):
                             current_section, []
                         ).append({
                             "page": page_number,
-                            "text": text,
+                            "text": first_line,
                             "subsection": current_subsection,
                             "is_heading": True,
                             "type": "heading",
                             "block_id": block_id,
+                            "unit": "block",
                         })
+
+                        if rest:
+
+                            sections[current_section].append({
+                                "page": page_number,
+                                "text": rest,
+                                "subsection": current_subsection,
+                                "is_heading": False,
+                                "type": block_type,
+                                "block_id": f"{block_id}#r",
+                                "unit": "block",
+                            })
 
                         continue
 
@@ -447,6 +499,7 @@ def split_into_sections(pages):
                     "is_heading": False,
                     "type": block_type,
                     "block_id": block_id,
+                    "unit": "block",
                 })
 
             continue
@@ -483,6 +536,7 @@ def split_into_sections(pages):
                         "is_heading": False,
                         "type": "unknown",
                         "block_id": None,
+                        "unit": "line",
                     })
 
                 continue
@@ -515,6 +569,7 @@ def split_into_sections(pages):
                     "is_heading": True,
                     "type": "heading",
                     "block_id": f"p{page_number}_b{fallback_block_counter}",
+                    "unit": "line",
                 })
 
                 continue
@@ -530,6 +585,7 @@ def split_into_sections(pages):
                 "is_heading": False,
                 "type": "paragraph",
                 "block_id": f"p{page_number}_b{fallback_block_counter}",
+                "unit": "line",
             })
 
     return sections

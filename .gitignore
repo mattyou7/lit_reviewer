@@ -5,6 +5,8 @@ __pycache__/
 data/raw/*
 data/processed/*
 data/datasets/*
+data/papers/*
+data/*.db
 models/*
 results/*
 logs/*

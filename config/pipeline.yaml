@@ -10,6 +10,13 @@ teacher:
   max_tokens: 2500
   temperature: 0.0
 
+search:
+  ncbi_email: ""
+  ncbi_tool: "lit-review-assistant"
+  timeout_s: 20
+  max_results_default: 20
+  request_pause_s: 0.34
+
 student:
   base_model: Qwen/Qwen3-0.6B
   quantization: null
@@ -23,6 +30,27 @@ chunking:
     - methods
     - results
     - discussion
+
+embedding:
+  model: sentence-transformers/all-MiniLM-L6-v2
+  version: "1.0"
+
+# ONE seed paper -> automatic first-degree discovery -> landscape.
+# All caps and the similarity floor below are the documented,
+# configurable policy: retrieval order only (no score ranking), and a
+# semantic-similarity edge is created only when cosine(seed, candidate)
+# >= similarity_min. Measured on all-MiniLM-L6-v2 (2026-09-23): the
+# seed PDF's own reference list scores 0.37-0.57 (12/12 clear the
+# floor) while retrieved-but-unrelated candidates score <=0.22, so
+# 0.30 sits in the empty gap between known-related and unrelated text.
+landscape:
+  auto_discover: true            # trigger discovery after a PDF enters a project
+  max_reference_resolutions: 15  # first-degree only: PDF references resolved externally (cap)
+  max_cited_by: 10               # PubMed cited-by (ELink) PMIDs stored per seed (cap)
+  max_candidates_pubmed: 10      # semantic candidates retrieved from PubMed (cap)
+  max_candidates_arxiv: 10       # semantic candidates retrieved from arXiv (cap)
+  similarity_min: 0.30           # cosine floor for semantic-similarity edges
+
 
 evaluation:
   metrics:

@@ -71,6 +71,113 @@ def is_header_footer(
 
 
 # ============================================================
+# Block type classification
+#
+# Runs once, at extraction time, on each individual PDF block.
+# Gives every downstream stage (sectioner, chunker, validator)
+# a shared answer to "what kind of thing is this text?" instead
+# of each stage re-guessing from scratch.
+#
+# Conservative: a block is only tagged as something other than
+# "paragraph" when it clearly matches a known shape. Ambiguous
+# blocks fall through to "paragraph" and may still be recognized
+# as a heading later, in the sectioner, where section/subsection
+# context is available.
+# ============================================================
+
+_MATH_SYMBOL_CHARS = set("=+\u2212±×÷≈≠≤≥∑∏√∞<>~^_")
+
+
+def _looks_like_equation(text: str) -> bool:
+    """
+    Detect isolated mathematical fragments such as:
+
+        X = p(x,ri,t)
+        i + β1
+        I(X;Ri,t) =
+    """
+
+    if len(text) > 150:
+        return False
+
+    symbol_count = sum(
+        1
+        for char in text
+        if char in _MATH_SYMBOL_CHARS
+    )
+
+    if symbol_count == 0:
+        return False
+
+    # "Real" words: alphabetic runs of 2+ characters. Single
+    # letters (x, i, t) are usually variable names, not words.
+    words = re.findall(
+        r"[A-Za-zÀ-ÖØ-öø-ÿ\u0370-\u03FF]{2,}",
+        text,
+    )
+
+    if len(words) <= 4:
+        return True
+
+    if len(text) > 0 and (symbol_count / len(text)) > 0.12 and len(words) <= 8:
+        return True
+
+    return False
+
+
+def _looks_like_reference(text: str) -> bool:
+    """
+    Detect bibliography-style entries, e.g.:
+
+        [12] Smith, J. et al. ...
+        3. Jones, A., Lee, B. ...
+    """
+
+    if re.match(r"^\[\d+\]", text):
+        return True
+
+    if re.match(
+        r"^\d{1,3}\.\s+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ\-']+(,|\s+et al\.?)",
+        text,
+    ):
+        return True
+
+    return False
+
+
+def classify_block_type(text: str) -> str:
+    """
+    Classify a single extracted block as one of:
+
+        paragraph | equation | figure_caption | table |
+        reference | unknown
+
+    NOTE: "heading" is intentionally never returned here. Whether
+    something is a section/subsection heading depends on
+    document-level context that only the sectioner has.
+    """
+
+    t = text.strip()
+
+    if not t:
+        return "unknown"
+
+    if re.match(r"^(figure|fig\.?)\s*\d+\b", t, re.IGNORECASE):
+        return "figure_caption"
+
+    if re.match(r"^table\s*\d+\b", t, re.IGNORECASE):
+        return "table"
+
+    if _looks_like_equation(t):
+        return "equation"
+
+    if _looks_like_reference(t):
+        return "reference"
+
+    return "paragraph"
+
+
+# ============================================================
 # Column ordering
 # ============================================================
 
@@ -217,7 +324,10 @@ def extract_pdf(path: str):
                 "height": ...,
                 "blocks": [
                     {
+                        "block_id": "p1_b3",
+                        "page": 1,
                         "text": "...",
+                        "type": "paragraph",
                         "bbox": [...],
                         "block_no": ...
                     }
@@ -227,8 +337,9 @@ def extract_pdf(path: str):
             ...
         ]
 
-    The `text` field is retained for compatibility with the
-    existing sectioning code.
+    Each block carries a stable `block_id` and a `type` (see
+    `classify_block_type`) so downstream stages don't re-derive
+    them. The `text` field is retained for compatibility.
     """
 
     path = Path(path)
@@ -284,7 +395,10 @@ def extract_pdf(path: str):
                     continue
 
                 block = {
+                    "block_id": f"p{page_number}_b{block_number}",
+                    "page": page_number,
                     "text": text,
+                    "type": classify_block_type(text),
                     "bbox": [
                         float(x0),
                         float(y0),

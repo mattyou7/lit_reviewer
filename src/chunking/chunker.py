@@ -66,12 +66,18 @@ def _build_paragraphs(
             "is_heading": False
         }
 
+    Two item origins exist (`unit` field, set by the sectioner):
+
+    - "block": one PyMuPDF block = one paragraph-like unit.
+      Blocks never contain blank-line separators, so joining
+      consecutive blocks would merge whole pages into a single
+      mega-paragraph. Each block stands alone (its internal
+      line wraps are joined with spaces).
+    - "line" (legacy, or missing): consecutive lines belonging
+      to the same paragraph are joined together; blank lines
+      terminate a paragraph.
+
     We DO NOT want every line to become a chunk.
-
-    Instead, consecutive lines belonging to the same paragraph
-    are joined together.
-
-    Blank lines terminate a paragraph.
 
     Returns:
 
@@ -87,6 +93,22 @@ def _build_paragraphs(
     current_start_page: Optional[int] = None
     current_end_page: Optional[int] = None
 
+    def _flush() -> None:
+        nonlocal current_lines, current_start_page, current_end_page
+        if current_lines:
+            paragraph = " ".join(current_lines).strip()
+            if paragraph:
+                paragraphs.append(
+                    (
+                        paragraph,
+                        current_start_page,
+                        current_end_page,
+                    )
+                )
+        current_lines = []
+        current_start_page = None
+        current_end_page = None
+
     for item in items:
 
         if not isinstance(item, dict):
@@ -96,28 +118,41 @@ def _build_paragraphs(
         page = item.get("page")
 
         # ----------------------------------------------------
-        # Blank line = paragraph boundary
+        # Block-origin item: one block = one paragraph.
         # ----------------------------------------------------
 
-        if not text:
+        if item.get("unit", "line") == "block":
 
-            if current_lines:
+            _flush()
 
-                paragraph = " ".join(current_lines).strip()
+            # Heading items are NOT paragraph text.
+            #
+            # The subsection name is already stored in metadata.
+            if item.get("is_heading", False):
+                continue
 
+            if text:
+                paragraph = " ".join(
+                    text.splitlines()
+                ).strip()
                 if paragraph:
                     paragraphs.append(
                         (
                             paragraph,
-                            current_start_page,
-                            current_end_page,
+                            page,
+                            page,
                         )
                     )
 
-                current_lines = []
-                current_start_page = None
-                current_end_page = None
+            continue
 
+        # ----------------------------------------------------
+        # Legacy line-origin items: join until blank line.
+        # ----------------------------------------------------
+
+        if not text:
+
+            _flush()
             continue
 
         # ----------------------------------------------------
@@ -144,18 +179,7 @@ def _build_paragraphs(
     # Flush final paragraph
     # --------------------------------------------------------
 
-    if current_lines:
-
-        paragraph = " ".join(current_lines).strip()
-
-        if paragraph:
-            paragraphs.append(
-                (
-                    paragraph,
-                    current_start_page,
-                    current_end_page,
-                )
-            )
+    _flush()
 
     return paragraphs
 
@@ -201,7 +225,22 @@ def _chunk_subsection(
 
     i = 0
 
+    # Structural hang guard: every loop iteration must either
+    # consume a paragraph or empty a non-empty accumulator, so
+    # this bound is never reached on legitimate input. It exists
+    # so a pathological case fails loudly instead of freezing.
+    max_iterations = len(paragraphs) * 4 + 100
+    iterations = 0
+
     while i < len(paragraphs):
+
+        iterations += 1
+
+        if iterations > max_iterations:
+            raise RuntimeError(
+                "chunker failed to make progress "
+                f"(paragraph {i}/{len(paragraphs)})"
+            )
 
         paragraph, start_page, end_page = paragraphs[i]
 
@@ -279,12 +318,26 @@ def _chunk_subsection(
 
             overlap_paragraphs.reverse()
 
-            current_paragraphs = overlap_paragraphs
+            # ------------------------------------------------
+            # The overlap tail is best-effort: if the pending
+            # paragraph still does not fit alongside it,
+            # carrying the tail would re-emit the identical
+            # chunk forever. Drop the tail (no overlap at this
+            # boundary) so the paragraph is reconsidered
+            # against an empty accumulator and always consumed.
+            # ------------------------------------------------
 
-            current_tokens = sum(
+            tail_tokens = sum(
                 _estimate_tokens(p[0])
-                for p in current_paragraphs
+                for p in overlap_paragraphs
             )
+
+            if tail_tokens + paragraph_tokens > target_tokens:
+                current_paragraphs = []
+                current_tokens = 0
+            else:
+                current_paragraphs = overlap_paragraphs
+                current_tokens = tail_tokens
 
             # IMPORTANT:
             # Do not increment i here.
@@ -310,7 +363,15 @@ def _chunk_subsection(
         i += 1
 
     # --------------------------------------------------------
-    # Final chunk
+    # Final chunk.
+    #
+    # NOTE: every append in the loop above consumes at least
+    # one new paragraph (the overlap tail alone is never
+    # re-emitted: it is either extended or dropped), so the
+    # final accumulation always contains fresh content. A
+    # text-equality guard here would wrongly drop legitimate
+    # chunks when source paragraphs repeat verbatim (e.g. a
+    # recurring equation).
     # --------------------------------------------------------
 
     if current_paragraphs:
@@ -323,18 +384,13 @@ def _chunk_subsection(
         chunk_start = current_paragraphs[0][1]
         chunk_end = current_paragraphs[-1][2]
 
-        # Avoid duplicate final chunk
-        if (
-            not chunks
-            or chunk_text != chunks[-1][0]
-        ):
-            chunks.append(
-                (
-                    chunk_text,
-                    chunk_start,
-                    chunk_end,
-                )
+        chunks.append(
+            (
+                chunk_text,
+                chunk_start,
+                chunk_end,
             )
+        )
 
     return chunks
 
